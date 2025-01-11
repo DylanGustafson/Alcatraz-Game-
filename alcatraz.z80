@@ -1,0 +1,600 @@
+;****************************************************************
+;*                       Alcatraz by Dylan                      *
+;*                       for TI-83+ series                      *
+;*                             2014                             *
+;****************************************************************
+
+LCDdriver:      equ		$10		;LCD driver port
+LCDdata:		equ		$11		;LCD data bus port
+LCDrow0:		equ		$80		;points LCD to first row
+LCDcol0:		equ		$20		;points LCD to first column
+
+include "ti83plus.inc"			;Syscall/RAM address definitions
+org $9D95                       ;Entry point for AsmPrgms
+
+;************************* Main Menu ****************************
+
+prgm:
+		bcall _ChkFindSym		;find alkatraz in ram, store pointer in de
+		ld hl,maps - prgm + 4	;offset of "maps"
+		add hl,de				;add to prgm pointer
+		ld (mapsptr),hl			;store pointer
+		bcall _RunIndicOff		;turn that pesky boy off
+		ld a,1					;
+		ld (level),a			;start at level 1
+
+start:							;Main Menu
+		ld hl,edit				;pointer to state variable
+		inc (hl)				;turn off editing (set nonzero)
+		bcall _ClrLCDFull		;clear screen
+
+		ld hl,$0200				;h = 2, l = 0
+		ld (curRow),hl			;currow = 0, curcol = 2
+		ld hl,title				;load title text pointer
+		bcall _PutS				;display title text
+
+		ld bc,$0037				;line start
+		ld de,$8E37				;line end
+		bcall _DarkLine			;draw line
+
+		ld hl,$0202				;h = 2, l = 2
+		ld (curRow),hl			;currow = 2, curcol = 2
+		ld hl,infos				;load info text pointer
+		bcall _PutS				;display info text
+
+lrefr:	ld hl,$0707				;h = 8, l = 7
+		ld (curRow),hl			;currow = 7, curcol = 7
+		ld hl,(level)			;put level number in hl
+		bcall _DispHL			;display level number
+
+		ld a,4					;
+		ld (curCol),a			;currow = 7, curcol = 4
+		ld hl,levtext			;load level text pointer
+		bcall _PutS				;display level text
+
+getkl1:	bcall _GetCSC			;lazy key test
+		or a					;(cp 0)
+		jr z,getkl1				;nothing pressed; loop
+
+		cp skClear				;
+		ret z					;"clear"=quit
+
+		ld hl,level				;load level number pointer
+		cp skUp					; ^ ?
+		jr nz,lincsk			;if not, skip
+
+		inc (hl)				;next level
+		jr lrefr				;refresh level number
+
+lincsk:	dec a					; v ($01)? (offsets a by -1)
+		jr nz,ldecsk			;if not, skip
+
+		cp (hl)					;is level = 0?
+		jr z,getkl1				;if so return to loop
+		dec (hl)				;previous level
+		jr lrefr				;refresh number
+
+ldecsk:	cp skMode - 1			;Mode key?
+		jr nz,editsk			;skip this if not
+
+		xor a					;
+		ld (hl),a				;set level to 0
+		dec hl					;hl = edit
+		ld (hl),a				;zero (activate) edit byte
+		ld a,sk2nd - 1			;to proceed to game
+editsk:	cp skDel - 1			;Del key?
+		call z,clearlev			;clear custom level if so
+
+		cp sk2nd - 1			;
+		jr nz,getkl1			;loop if not "2nd"
+
+
+;************************* Load Level ***************************
+
+biglp:							;looping through levels
+		bcall _GrBufClr			;clear buffer
+		bcall _ClrLCDFull		;clear screen
+		ld hl,ycoord			;
+		xor a					;zero a
+		ld (hl),a				;zero out x
+		inc hl					;
+		ld (hl),a				;zero out y
+		inc hl					;
+		ld (hl),a				;zero out count
+
+		ld hl,(level)			;get level number
+		add hl,hl				;
+		add hl,hl				;
+		add hl,hl				;
+		add hl,hl				;  multiply by 48
+		ld d,h					;to get level offset
+		ld e,l					;
+		add hl,de				;
+		add hl,de				;
+		ld de,maps				;pointer to first map
+		add hl,de				;add offset to current level's map
+		ex de,hl				;de = pointer to map start
+
+loadloop:
+		ld a,(de)				;load byte from map
+		inc de					;advance pointer
+		push de					;save this bad boy
+
+		push af					;save a as well
+		rra						;
+		rra						;extract left nybble
+		rra						; (divide a by 16)
+		rra						;
+		call drawsprites		;draw corresponding sprite
+		ld hl,xcoord			;
+		inc (hl)				;advance x
+		pop af					;we is pop as fuck
+		call drawsprites		;draw next corresponding sprite (right nyb)
+
+		pop de					;bring back out
+		ld hl,xcoord			;
+		inc (hl)				;advance x
+		ld a,12					;
+		cp (hl)					;at right edge?
+		jr nz,loadloop			;loop if not
+
+		ld (hl),0				;reset xcoord
+		dec hl					;
+		inc (hl)				;advance y
+		ld a,8					;
+		cp (hl)					;at bottom edge?
+		jr nz,loadloop			;loop if not
+
+		ld hl,(chary)			;load up player's coords
+		ld (ycoord),hl			; starting position
+
+
+;************************* Gameplay *****************************
+
+gamelp:
+		call xorchar			;draw player
+		call dispbuffer			;display buffer
+		call xorchar			;erase player
+		ld hl,gamelp			;push gamelp for
+		push hl					;easy return to loop
+
+		bcall _GetCSC			;lazy key scan
+		dec a					;a = 1 ?
+		jr z,down				;
+		dec a					;a = 2 ?
+		jr z,left				;
+		dec a					;a = 3 ?
+		jr z,right				;
+		dec a					;a = 4 ?
+		jr z,up					;
+
+		cp sk2nd - 4			;test for 2nd key
+		jp z,secondkey			;
+		cp skMode - 4			;test for MODE key
+		jp z,modekey			;
+		cp skClear - 4			;test for clear key
+		ret nz					;back up to gamelp if not
+		pop hl					;
+		ld a,(edit)				;
+		or a					;check if in editing mode
+		call z,reasm			;if so reassemble map
+		jp start				;back to menu
+
+right:	ld hl,xcoord			;l = row, h = col
+		ld a,11					;put col into a
+		cp (hl)					;check if at bounds
+		ret z					;back to gamelp if so
+		inc (hl)				;advance a block
+		ld a,(edit)				;
+		or a					;currently editing (level 0?)
+		ret z					;return if so
+
+		call blocktest			;is there a block?
+		jr z,checkforbox		;if not, retain new position & check for box
+		dec (hl)				;reset to original
+		ret						;return to gamelp
+
+left:	ld hl,xcoord			;Similar to 'right'
+		cp (hl)
+		ret z
+		dec (hl)
+		ld a,(edit)
+		or a
+		ret z
+
+		call blocktest
+		jr z,checkforbox
+		inc (hl)
+		ret
+
+down:	ld hl,ycoord			;Similar to 'right'
+		ld a,7
+		cp (hl)
+		ret z
+		inc (hl)
+		ld a,(edit)
+		or a
+		ret z
+
+		call blocktest
+		jr z,checkforbox
+		dec (hl)
+		ret
+
+up:		ld hl,ycoord			;Similar to 'right'
+		cp (hl)
+		ret z
+		dec (hl)
+		ld a,(edit)
+		or a
+		ret z
+
+		call blocktest
+		jr z,checkforbox
+		inc (hl)
+		ret
+
+checkforbox:
+		call boxtest			;box at x,y?
+		ret z					;return to gamelp if not
+		ld hl,count				;
+		dec (hl)				;dec number of boxes
+		call cskip				;erase box sprite
+
+		ld a,(count)			;
+		or a					;are they all gone?
+		jr nz,xorblock			;draw a box & return if not
+
+		ld de,smileydata		;
+		call xorsprite			;draw smiley face
+		call dispbuffer			;put on screen
+getkl2:	bcall _GetCSC			;
+		or a					;pause
+		jr z,getkl2				;
+		ld hl,level				;level pointer in hl
+		inc (hl)				;advance to next
+reset:	pop hl					;pop out gamelp
+		jp biglp				;back up to main loop
+
+
+;********************** Sprite Functions ************************
+
+secondkey:
+		ld a,(edit)				;
+		or a					;currently editing?
+		jp nz,reset				;if not, go reset level
+		call boxtest			;is there a box there?
+		call nz,xorbox			;if so, erase it
+
+xorblock:
+		ld de,blockdata			;set up block pointer
+		jp xorsprite			;draw/erase block sprite
+
+modekey:
+		ld a,(edit)				;
+		or a					;currently editing?
+		ret nz					;return back to gamelp if not
+		call blocktest			;check for a block
+		call nz,xorblock		;if there, erase it
+
+xorbox:	ld hl,count				;load count pointer
+		inc (hl)				;increase count of boxes
+cskip:							;skips adding to the counter
+		ld de,boxdata			;load box sprite pointer
+		jp xorsprite			;draw/erase box sprite
+
+charload:
+		ld hl,(ycoord)			; temp copy of current x,y
+		ld (chary),hl			; for initial char position
+		ret						;
+
+drawsprites:
+		and %00001111			;extract nybble
+		dec a					;if byte is 1
+		jr z,xorblock			;draw block
+		dec a					;if byte is 2
+		jr z,xorbox				;draw box
+		dec a					;if byte is 3
+		jr z,charload			;load character
+		ret						;otherwise return
+
+boxtest:
+		call getbufptr			;get pointer to current coords in buffer
+		ld bc,12				;     next pixel row
+		add hl,bc				; (12 bytes to the right)
+		bit 5,(hl)				;indicates box sprite
+		ret						;
+
+blocktest:
+		push hl					;save hl (coordinates)
+		call getbufptr			;get pointer to current coords in buffer
+		bit 7,(hl)				;indicates block sprite
+		pop hl					;bring coords back into hl
+		ret						;
+
+
+;********************* Graphics Functions ***********************
+
+getbufptr:						;must preserve de
+		ld hl,(ycoord)			;h = col, l = row
+		ld a,h					;a = col
+		ld h,0					;h l = 0 row
+		ld b,h					;
+		ld c,l					;bc = hl
+
+		add hl,bc				;
+		add hl,bc				;
+		add hl,hl				;
+		add hl,hl				; hl = row * 96
+		add hl,hl				;
+		add hl,hl				;
+		add hl,hl				;
+
+		ld b,0					;
+		ld c,a					;b c = 0 col
+		add hl,bc				;hl = row * 96 + col
+		ld bc,gbuf				;graph buffer start
+		add hl,bc				;hl = gbuf pointer
+		ret						;
+
+xorchar:
+		ld de,chardata			;load char pointer
+xorsprite:
+		call getbufptr			;hl = starting pointer on buffer
+		ld bc,$080C				;ld b,8 & ld c,12
+spriteloop:
+		ld a,(de)				;pull up sprite byte (row of 8 pixels)
+		xor (hl)				;xor with those already in buffer
+		ld (hl),a				;store new pixel data
+		inc de					;next sprite byte
+		ld a,b					;save b
+		ld b,0					;bc = 12
+		add hl,bc				;next row (screen is 12*8 px wide)
+		ld b,a					;recover b
+		djnz spriteloop			;8 times
+		ret						;
+
+dispbuffer:						;ion's fastcopy algorithm
+		di						;disable hardware interrupts
+		ld a,LCDrow0			;row 0
+		out (LCDdriver),a		;start at top row
+		ld hl,gbuf-12-1+12*64	;bottom row buf pointer
+		ld a,LCDcol0			;collumn 0
+		ld c,a					;initialize c in 4 cycles
+		inc hl					;6-cycle waste
+		dec hl					;6-cycle waste
+columnloop:
+		ld b,64					;64 rows to go through
+		inc c					;update column counter
+		ld de,1-12*64			;offset for moving to top of row
+		out (LCDdriver),a		;point to correct column (a = c-1)
+		add hl,de				;move buf pointer to top row again
+		ld de,10				;initialize row incementer
+rowloop:
+		add hl,de				; point to next row in buf
+		inc hl					;     (add hl,12)
+		inc hl					;  in 23 clock cycles
+		inc de					;6-cycle waste
+		ld a,(hl)				;load 8 bits from buffer
+		out (LCDdata),a			;display 8 pixels (1 byte) on screen
+		dec de					;6-cycle waste
+		djnz rowloop			;repeat for 64 rows
+
+		ld a,c					;bring up c
+		cp LCDcol0+12			;all 12 columns?
+		jr nz,columnloop		;if not repeat with next column
+
+		ei						;re-enable hardware interrupts
+		ret						;
+
+
+;*********************** Save Custom Level **********************
+
+reasm:
+		call xorchar			;redraw erased character
+		ld hl,0					;
+		ld (ycoord),hl			;zero out coords
+		ld e,h					;e = 0 (map offset)
+asmloop:
+		call getsprbyte			;get sprite byte into a
+		ld d,a					;temp storage
+		ld hl,xcoord			;bring up x
+		inc (hl)				;advance right
+		call getsprbyte			;get next sprite byte into a
+
+		ld b,a					;copy right byte
+		ld a,d					;load a as left byte (still in d)
+		add a,a					;
+		add a,a					;multiply by 16 to
+		add a,a					;put in left nybble
+		add a,a					;
+		or b					;combine left & right nybbles into a
+
+		ld d,0					; d e = 0 offset
+		ld hl,maps				;
+		add hl,de				;hl = current map byte address
+		ld (hl),a				;store byte
+		ld hl,(mapsptr)			;pull up actual map pointer
+		add hl,de				;hl = current map byte address in prgm
+		ld (hl),a				;copy back
+
+		inc e					;next byte
+		ld hl,xcoord			;bring up x
+		inc (hl)				;advance right
+		ld a,12					;
+		cp (hl)					;check if reached right edge
+		jr nz,asmloop			;loop if not
+
+		ld (hl),0				;reset xcoord
+		dec hl					;point to ycoord
+		inc (hl)				;advance y
+		ld a,8					;
+		cp (hl)					;check if reached bottom edge
+		jr nz,asmloop			;loop if not
+		ret						;return to start
+
+getsprbyte:						;must be updated if sprite bitmaps are modified
+		call getbufptr			;get sprite's top row pointer
+		ld bc,12				; add 12 to point
+		add hl,bc				;  to second row
+
+		xor a					;a = 0
+		bit 4,(hl)				;block/box/char?
+		ret z					;return if neither (blank)
+
+		inc a					;a = 1
+		bit 5,(hl)				;box/char?
+		ret z					;return if neither (block)
+
+		inc a					;a = 2
+		bit 6,(hl)				;char?
+		ret z					;return if not (box)
+
+		inc a					;a = 3
+		ret						;back to asmloop (char)
+
+clearlev:
+		ld hl,maps				;custom map start pointer
+		ld a,$30				;char = 3
+		ld (hl),a				;char in top left corner
+		inc hl					;next byte
+		xor a					;ld a,0
+		ld b,47					;47 more bytes to clear
+clrloop:ld (hl),a				;reset byte
+		inc hl					;advance pointer
+		djnz clrloop			;repeat 47 times
+		ret						;back to menu
+
+
+;************************ Vars & Data ***************************
+
+chary: 		db 0
+charx:		db 0
+ycoord:		db 0
+xcoord:		db 0
+count:		db 0
+edit:		db 0
+level:		dw 1
+mapsptr:	dw 0
+
+title:		db	  "Alcatraz Z80",0
+infos:		db	  "2nd    Start  "
+			db	"  Mode    Edit  "
+			db	"  Del    Reset  "
+			db	"  Clear   Quit",0
+
+levtext:	db		"Level:"
+
+boxdata:						;Sprite data
+db %00000000                    ;null char for levtext
+db %00111100
+db %01000010
+db %01011010
+db %01011010
+db %01000010
+db %00111100
+
+chardata:
+db %00000000
+db %01111110
+db %01100110
+db %01000010
+db %01000010
+db %01100110
+db %01111110
+
+smileydata:						;)
+db %00000000
+db %01100110
+db %01100110
+db %00000000
+db %01000010
+db %01000010
+db %00111100
+db %00000000
+
+blockdata:
+db %10101010
+db %01010101
+db %10101010
+db %01010101
+db %10101010
+db %01010101
+db %10101010
+db %01010101
+
+
+maps:							;Levels
+dd $300000000000
+dd $000000000000
+dd $000000000000
+dd $000000000000
+dd $000000000000
+dd $000000000000
+dd $000000000000
+dd $000000000000
+
+dd $300122222222
+dd $110122211110
+dd $000211000000
+dd $011000102220
+dd $000010012102
+dd $012121012022
+dd $011201011222
+dd $000021002222
+
+dd $210120220112
+dd $012112220000
+dd $210022223102
+dd $212222120201
+dd $012022200102
+dd $201012220121
+dd $222012122001
+dd $021120201121
+
+dd $302022120221
+dd $221010202112
+dd $021022102020
+dd $011222120202
+dd $002111212111
+dd $222000021202
+dd $101210220122
+dd $202202220002
+
+dd $310221222212
+dd $020101202220
+dd $010220101222
+dd $012122201212
+dd $200102112020
+dd $112101202211
+dd $022122022122
+dd $010022120002
+
+dd $122222112020
+dd $202222120212
+dd $222212112020
+dd $112123201011
+dd $220212120002
+dd $212210101122
+dd $212122201222
+dd $000020102222
+
+dd $022020102202
+dd $210112201221
+dd $202002212022
+dd $010121022102
+dd $220132011210
+dd $012121202022
+dd $212202212010
+dd $002210222220
+
+dd $322221222222
+dd $212222222122
+dd $222222122221
+dd $221222222222
+dd $222222221222
+dd $122221222222
+dd $222222212222
+dd $222122222212
+
+end
